@@ -782,8 +782,105 @@ export async function sendMessage(salonId, phone, content, isLid = false, lidId 
   const result = await session.socket.sendMessage(jid, { text: content });
   const destination = isLid ? `LID:${lidId}` : phone;
   console.log(`📤 [${salonId}] Message envoyé à ${destination}`);
-  
+
   return result;
+}
+
+// ═══════════════════════════════════════════
+// ENVOI DE MÉDIAS (Images, Vidéos, Documents)
+// ═══════════════════════════════════════════
+export async function sendMediaMessage(salonId, phone, media, options = {}) {
+  const session = sessions.get(salonId);
+  if (!session || session.status !== 'connected') {
+    throw new Error('Session non connectée');
+  }
+
+  const { isLid, lidId } = options;
+  const jid = buildJid({ phoneNumber: phone, isLid, lidId });
+
+  if (!jid) {
+    throw new Error('Impossible de construire le JID');
+  }
+
+  // Valider le type de média
+  const validTypes = ['image', 'video', 'audio', 'document', 'sticker'];
+  if (!validTypes.includes(media.type)) {
+    throw new Error(`Type de média invalide: ${media.type}. Types supportés: ${validTypes.join(', ')}`);
+  }
+
+  // Construire le message selon le type
+  let messageContent = {};
+
+  try {
+    // Récupérer le média (URL ou buffer)
+    let mediaData;
+    if (media.url) {
+      // Télécharger depuis URL
+      console.log(`📥 [${salonId}] Téléchargement média depuis: ${media.url.substring(0, 50)}...`);
+      const response = await axios.get(media.url, {
+        responseType: 'arraybuffer',
+        timeout: 30000
+      });
+      mediaData = Buffer.from(response.data);
+    } else if (media.base64) {
+      // Décoder base64
+      mediaData = Buffer.from(media.base64, 'base64');
+    } else if (media.buffer) {
+      mediaData = media.buffer;
+    } else {
+      throw new Error('Média requis: url, base64, ou buffer');
+    }
+
+    // Construire le message selon le type
+    switch (media.type) {
+      case 'image':
+        messageContent = {
+          image: mediaData,
+          caption: media.caption || ''
+        };
+        break;
+
+      case 'video':
+        messageContent = {
+          video: mediaData,
+          caption: media.caption || ''
+        };
+        break;
+
+      case 'audio':
+        messageContent = {
+          audio: mediaData,
+          mimetype: media.mimetype || 'audio/mp4',
+          ptt: media.ptt || false  // true = message vocal
+        };
+        break;
+
+      case 'document':
+        messageContent = {
+          document: mediaData,
+          mimetype: media.mimetype || 'application/pdf',
+          fileName: media.fileName || 'document',
+          caption: media.caption || ''
+        };
+        break;
+
+      case 'sticker':
+        messageContent = {
+          sticker: mediaData
+        };
+        break;
+    }
+
+    const result = await session.socket.sendMessage(jid, messageContent);
+    const destination = isLid ? `LID:${lidId}` : phone;
+    console.log(`📤 [${salonId}] ${media.type} envoyé à ${destination}`);
+
+    return result;
+
+  } catch (error) {
+    console.error(`❌ [${salonId}] Erreur envoi média:`, error.message);
+    throw error;
+  }
 }
 
 function getMessageType(message) {

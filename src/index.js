@@ -78,6 +78,7 @@ const {
 
 // Additional hybrid functions
 const sendTemplateMessage = sessionManager.sendTemplateMessage;
+const sendMediaMessage = sessionManager.sendMediaMessage;
 const reconnectExistingSessions = sessionManager.reconnectExistingSessions;
 const cleanupDeadSessions = sessionManager.cleanupDeadSessions;
 
@@ -226,6 +227,48 @@ app.post('/session/:salonId/send', async (req, res) => {
       success: true,
       messageId: result?.messageId,
       provider: result?.provider
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════
+// MEDIA ENDPOINT (Images, Videos, Documents)
+// ═══════════════════════════════════════════
+
+app.post('/session/:salonId/send-media', async (req, res) => {
+  const { salonId } = req.params;
+  const { phone, type, url, base64, caption, fileName, mimetype, ptt, isLid, lidId } = req.body;
+
+  if (!phone) {
+    return res.status(400).json({ error: 'phone requis' });
+  }
+
+  if (!type) {
+    return res.status(400).json({ error: 'type requis (image, video, audio, document, sticker)' });
+  }
+
+  if (!url && !base64) {
+    return res.status(400).json({ error: 'url ou base64 requis' });
+  }
+
+  try {
+    const media = {
+      type,
+      url,
+      base64,
+      caption,
+      fileName,
+      mimetype,
+      ptt
+    };
+
+    const result = await sendMediaMessage(salonId, phone, media, { isLid, lidId });
+    res.json({
+      success: true,
+      messageId: result?.key?.id,
+      type
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
