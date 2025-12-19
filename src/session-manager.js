@@ -33,6 +33,23 @@ const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 const sessions = new Map();
 const statusCallbacks = new Map();
 const pollingIntervals = new Map();
+const reconnectTimers = new Map();
+
+// Exponential backoff with jitter
+function calculateBackoffDelay(attempt) {
+  const baseDelay = 1000; // 1 second
+  const maxDelay = 60000; // 60 seconds max
+  const exponentialDelay = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
+  // Add jitter: random value between 0 and 30% of the delay
+  const jitter = Math.random() * exponentialDelay * 0.3;
+  return Math.floor(exponentialDelay + jitter);
+}
+
+// Add jitter to polling interval to prevent thundering herd
+function getPollingIntervalWithJitter() {
+  const jitter = Math.random() * POLLING_INTERVAL * 0.2; // 20% jitter
+  return POLLING_INTERVAL + jitter;
+}
 
 // Créer le dossier temp s'il n'existe pas
 const TEMP_DIR = './temp';
@@ -184,12 +201,23 @@ async function startPolling(salonId) {
     return;
   }
 
-  console.log(`🔄 [${salonId}] Démarrage du polling (interval: ${POLLING_INTERVAL}ms)`);
+  console.log(`🔄 [${salonId}] Démarrage du polling (interval: ~${POLLING_INTERVAL}ms avec jitter)`);
 
-  const intervalId = setInterval(async () => {
-    await pollPendingMessages(salonId);
-  }, POLLING_INTERVAL);
+  // Use dynamic interval with jitter to prevent thundering herd
+  let isPolling = false;
+  const poll = async () => {
+    // Skip if already polling (prevents overlapping polls)
+    if (isPolling) return;
 
+    isPolling = true;
+    try {
+      await pollPendingMessages(salonId);
+    } finally {
+      isPolling = false;
+    }
+  };
+
+  const intervalId = setInterval(poll, getPollingIntervalWithJitter());
   pollingIntervals.set(salonId, intervalId);
 }
 
@@ -479,17 +507,40 @@ export async function createSession(salonId) {
           session.reconnectAttempts = 0;
         }
 
-        if (session.reconnectAttempts < 5) {
+        const maxReconnectAttempts = 8; // More attempts with exponential backoff
+        if (session.reconnectAttempts < maxReconnectAttempts) {
           session.reconnectAttempts++;
           session.status = 'reconnecting';
+
+          const delay = calculateBackoffDelay(session.reconnectAttempts);
+
           notifyStatusChange(salonId, {
             status: 'reconnecting',
-            attempt: session.reconnectAttempts
+            attempt: session.reconnectAttempts,
+            maxAttempts: maxReconnectAttempts,
+            nextRetryIn: delay
           });
-          setTimeout(() => createSession(salonId), 3000 * session.reconnectAttempts);
+
+          console.log(`🔄 [${salonId}] Reconnecting in ${delay}ms (attempt ${session.reconnectAttempts}/${maxReconnectAttempts})`);
+
+          // Clear existing reconnect timer
+          const existingTimer = reconnectTimers.get(salonId);
+          if (existingTimer) {
+            clearTimeout(existingTimer);
+          }
+
+          const timerId = setTimeout(() => {
+            reconnectTimers.delete(salonId);
+            createSession(salonId).catch(err => {
+              console.error(`❌ [${salonId}] Reconnect failed:`, err.message);
+            });
+          }, delay);
+
+          reconnectTimers.set(salonId, timerId);
         } else {
           session.status = 'failed';
-          notifyStatusChange(salonId, { status: 'failed' });
+          notifyStatusChange(salonId, { status: 'failed', reason: 'Max reconnection attempts reached' });
+          console.error(`❌ [${salonId}] Session failed after ${maxReconnectAttempts} attempts`);
         }
       }
 
@@ -650,24 +701,70 @@ export async function disconnectSession(salonId) {
   const session = sessions.get(salonId);
   if (!session) return false;
 
+  // Stop polling
   stopPolling(salonId);
+
+  // Clear reconnect timer
+  const reconnectTimer = reconnectTimers.get(salonId);
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimers.delete(salonId);
+  }
+
+  // Remove event listeners if socket exists
+  if (session.socket?.ev) {
+    try {
+      session.socket.ev.removeAllListeners();
+    } catch (e) {
+      // Ignore cleanup errors
+    }
+  }
 
   try {
     if (session.socket) {
       await session.socket.logout();
     }
   } catch (e) {
-    console.error('Erreur logout:', e);
+    console.error('Erreur logout:', e.message);
   }
 
   const authDir = path.join('./auth', salonId);
-  fs.rmSync(authDir, { recursive: true, force: true });
+  try {
+    fs.rmSync(authDir, { recursive: true, force: true });
+  } catch (e) {
+    console.error('Erreur suppression auth:', e.message);
+  }
 
   sessions.delete(salonId);
+  statusCallbacks.delete(salonId); // Clean up callbacks too
   notifyStatusChange(salonId, { status: 'disconnected' });
 
-  console.log(`🔌 Session ${salonId} déconnectée`);
+  console.log(`🔌 Session ${salonId} déconnectée et nettoyée`);
   return true;
+}
+
+// Clean up dead sessions periodically
+export function cleanupDeadSessions() {
+  const deadSessionTimeout = 30 * 60 * 1000; // 30 minutes
+  const now = Date.now();
+
+  for (const [salonId, session] of sessions.entries()) {
+    // Clean up sessions stuck in 'failed' status
+    if (session.status === 'failed') {
+      console.log(`🧹 Cleaning up failed session: ${salonId}`);
+      disconnectSession(salonId).catch(() => {});
+      continue;
+    }
+
+    // Clean up sessions stuck in 'initializing' for too long
+    if (session.status === 'initializing' && session.createdAt) {
+      const age = now - new Date(session.createdAt).getTime();
+      if (age > deadSessionTimeout) {
+        console.log(`🧹 Cleaning up stuck session: ${salonId}`);
+        disconnectSession(salonId).catch(() => {});
+      }
+    }
+  }
 }
 
 export async function sendMessage(salonId, phone, content, isLid = false, lidId = null) {
