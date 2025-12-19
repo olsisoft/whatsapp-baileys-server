@@ -1,0 +1,47 @@
+# Dependencies
+node_modules
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment (sera monte en volume ou passe en env)
+.env.local
+.env.*.local
+
+# Documentation
+README.md
+docs/
+
+# Tests
+test/
+tests/
+*.test.js
+*.spec.js
+coverage/
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Fichiers temporaires
+temp/*
+!temp/.gitkeep
+
+# Claude
+.claude/
